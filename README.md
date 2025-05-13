@@ -15,7 +15,7 @@
 
 1. 저장소를 클론합니다:
 ```
-git clone https://github.com/YSCHOI-github/multi_agents_chatbot/upload
+git clone https://github.com/YSCHOI-github/multi_agents_chatbot
 cd pdf-multiagent-chatbot
 ```
 

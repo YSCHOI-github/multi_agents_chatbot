@@ -1,0 +1,7 @@
+streamlit
+PyPDF2
+scikit-learn
+numpy
+pandas
+google-generativeai
+concurrent-futures

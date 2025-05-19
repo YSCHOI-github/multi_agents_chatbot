@@ -1,9 +1,12 @@
-import streamlit as st
 import os
+import streamlit as st
+import asyncio
 import tempfile
-import concurrent.futures
-import json
-from utils import PDFLoader, VectorStore, AIAgent, HeadAgent, ConversationManager
+import time
+from typing import Dict, List, Any
+import pandas as pd
+
+from utils_v10 import PDFProcessor, VectorStore, DocumentAgent, HeadAgent, GeminiClient
 
 # 페이지 설정
 st.set_page_config(
@@ -13,167 +16,219 @@ st.set_page_config(
 )
 
 # 세션 상태 초기화
-if 'vector_stores' not in st.session_state:
-    st.session_state.vector_stores = {}
-if 'pdf_names' not in st.session_state:
-    st.session_state.pdf_names = []
-if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = []
-if 'conversation_manager' not in st.session_state:
-    st.session_state.conversation_manager = None
-if 'api_key' not in st.session_state:
-    st.session_state.api_key = ""
-if 'temp_dir' not in st.session_state:
-    st.session_state.temp_dir = tempfile.mkdtemp()
+def init_session_state():
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+    if "document_agents" not in st.session_state:
+        st.session_state.document_agents = {}
+    if "vector_stores" not in st.session_state:
+        st.session_state.vector_stores = {}
+    if "gemini_client" not in st.session_state:
+        st.session_state.gemini_client = None
+    if "head_agent" not in st.session_state:
+        st.session_state.head_agent = None
+    if "api_key_submitted" not in st.session_state:
+        st.session_state.api_key_submitted = False
+    if "pdf_uploaded" not in st.session_state:
+        st.session_state.pdf_uploaded = False
+    if "processing" not in st.session_state:
+        st.session_state.processing = False
 
-# 제목 및 설명
-st.title("📚 PDF 문서 기반 멀티 에이전트 챗봇")
-st.markdown("""
-이 챗봇은 여러 PDF 문서에서 정보를 추출하여 질문에 답변합니다.
-각 문서별 AI 에이전트가 답변을 생성하고, 헤드 에이전트가 이를 종합하여 최종 답변을 제공합니다.
-""")
+# PDF 처리 함수
+def process_pdf(pdf_file, file_name):
+    """PDF 파일을 처리하여 벡터 스토어를 생성합니다."""
+    pdf_processor = PDFProcessor(chunk_size=1000, chunk_overlap=200)
+    
+    # 텍스트 추출
+    text = pdf_processor.extract_text_from_pdf(pdf_file)
+    
+    # 텍스트를 청크로 분할
+    chunks = pdf_processor.split_text_into_chunks(text)
+    
+    # 벡터 스토어 생성
+    vector_store = VectorStore(chunks)
+    
+    return vector_store
 
-# 사이드바 - API 키 입력
-with st.sidebar:
-    st.header("⚙️ 설정")
-    api_key = st.text_input("Google API 키를 입력하세요:", type="password", value=st.session_state.api_key)
+# 문서 에이전트 생성 함수
+def create_document_agent(doc_name, vector_store, gemini_client):
+    """문서별 에이전트를 생성합니다."""
+    return DocumentAgent(
+        doc_name=doc_name,
+        vector_store=vector_store,
+        genai_client=gemini_client.get_client(),
+        model_name="models/gemini-1.5-flash"
+    )
+
+# API 키 제출 함수
+def submit_api_key():
+    api_key = st.session_state.api_key_input
     if api_key:
-        st.session_state.api_key = api_key
+        try:
+            st.session_state.gemini_client = GeminiClient(api_key)
+            st.session_state.head_agent = HeadAgent(
+                genai_client=st.session_state.gemini_client.get_client(),
+                model_name="models/gemini-1.5-flash"
+            )
+            st.session_state.api_key_submitted = True
+            st.success("API 키가 성공적으로 적용되었습니다!")
+        except Exception as e:
+            st.error(f"API 키 설정 중 오류가 발생했습니다: {str(e)}")
+    else:
+        st.warning("API 키를 입력해주세요.")
 
-    st.header("📄 PDF 파일 업로드")
-    uploaded_files = st.file_uploader("PDF 파일을 업로드하세요 (여러 파일 가능)", type="pdf", accept_multiple_files=True)
+# 질문 처리 함수
+async def process_question(question: str):
+    """사용자 질문을 처리하여 답변을 생성합니다."""
+    if not st.session_state.document_agents:
+        return "PDF 문서를 먼저 업로드해주세요."
+    
+    st.session_state.processing = True
+    
+    # 각 문서 에이전트에 질문 전달
+    doc_answers = {}
+    tasks = []
+    
+    for doc_name, agent in st.session_state.document_agents.items():
+        task = agent.answer_question(question)
+        tasks.append((doc_name, task))
+    
+    # 비동기로 모든 에이전트의 답변 수집
+    for doc_name, task in tasks:
+        answer = await task
+        doc_answers[doc_name] = answer
+    
+    # 헤드 에이전트가 답변 종합
+    final_answer = await st.session_state.head_agent.synthesize_answers(question, doc_answers)
+    
+    # 대화 기록 업데이트
+    st.session_state.head_agent.update_history(question, final_answer)
+    st.session_state.chat_history.append({"user": question, "assistant": final_answer})
+    
+    st.session_state.processing = False
+    return final_answer
 
-    if uploaded_files:
-        process_button = st.button("PDF 처리 시작")
-        if process_button:
-            with st.spinner("PDF 파일을 처리 중입니다..."):
-                st.session_state.vector_stores = {}
-                st.session_state.pdf_names = []
+# 새 대화 시작 함수
+def start_new_chat():
+    st.session_state.chat_history = []
 
-                for uploaded_file in uploaded_files:
-                    temp_file_path = os.path.join(st.session_state.temp_dir, uploaded_file.name)
-                    with open(temp_file_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-
-                    pdf_loader = PDFLoader(temp_file_path)
-                    pdf_text = pdf_loader.extract_text()
-                    if not pdf_text.startswith("Error"):
-                        chunks = pdf_loader.chunk_text(pdf_text)
-                        vstore = VectorStore()
-                        vstore.add_chunks(chunks, uploaded_file.name)
-                        if vstore.build_index():
-                            st.session_state.vector_stores[uploaded_file.name] = vstore
-                            st.session_state.pdf_names.append(uploaded_file.name)
-                            st.success(f"{uploaded_file.name} 처리 완료!")
-                        else:
-                            st.error(f"{uploaded_file.name} 인덱싱 실패")
-                    else:
-                        st.error(pdf_text)
-
-                if st.session_state.vector_stores:
-                    # 대화 관리자 초기화
-                    st.session_state.conversation_manager = ConversationManager()
-                    st.success(f"모든 PDF 파일 처리 및 인덱싱 완료! 총 {len(st.session_state.vector_stores)}개의 문서가 처리되었습니다.")
-                else:
-                    st.error("인덱싱에 실패했습니다. 유효한 PDF 파일을 업로드했는지 확인하세요.")
-
-    if st.session_state.pdf_names:
-        st.header("📋 처리된 PDF 파일")
-        st.write(f"총 {len(st.session_state.pdf_names)}개의 문서가 처리되었습니다.")
-        for pdf_name in st.session_state.pdf_names:
-            st.write(f"- {pdf_name}")
-
-# 단일 문서에 대한 응답 생성 함수 (병렬 처리용)
-def process_document(doc_name, vector_store, user_query, api_key, conversation_history=None):
-    contexts = vector_store.search(user_query, top_k=3)
-    if contexts:
-        agent = AIAgent(api_key, doc_name)
-        return agent.generate_response(user_query, contexts, conversation_history)
-    return None
-
-# 메인 화면 - 챗 인터페이스
-if st.session_state.pdf_names and st.session_state.api_key:
-    st.header("💬 챗봇과 대화하기")
-    for chat in st.session_state.chat_history:
-        if chat["role"] == "user":
-            st.markdown(f'<div style="background-color: #f0f2f6; padding: 10px; border-radius: 10px; margin-bottom: 10px;"><strong>질문:</strong> {chat["content"]}</div>', unsafe_allow_html=True)
+# 메인 함수
+def main():
+    # 세션 상태 초기화
+    init_session_state()
+    
+    # 사이드바: API 키 입력 및 PDF 업로드
+    with st.sidebar:
+        st.title("PDF 문서 기반 챗봇")
+        st.subheader("설정")
+        
+        # Google API 키 입력
+        if not st.session_state.api_key_submitted:
+            st.text_input("Google Gemini API 키 입력", 
+                          type="password", 
+                          key="api_key_input", 
+                          placeholder="API 키를 입력하세요...")
+            st.button("API 키 제출", on_click=submit_api_key)
         else:
-            st.markdown(f'<div style="background-color: #e6f7ff; padding: 10px; border-radius: 10px; margin-bottom: 10px;"><strong>답변:</strong> {chat["content"]}</div>', unsafe_allow_html=True)
-
-    user_query = st.text_input("질문을 입력하세요:", key="user_query")
-
-    if st.button("질문하기") and user_query:
-        with st.spinner("답변을 생성 중입니다..."):
-            # 대화 기록에 사용자 질문 추가
-            st.session_state.chat_history.append({"role": "user", "content": user_query})
+            st.success("API 키가 설정되었습니다.")
             
-            # 대화 관리자에 현재 질문 추가
-            if st.session_state.conversation_manager:
-                st.session_state.conversation_manager.add_user_message(user_query)
+            # PDF 파일 업로드
+            uploaded_files = st.file_uploader(
+                "PDF 파일 업로드 (여러 파일 선택 가능)",
+                type=["pdf"],
+                accept_multiple_files=True
+            )
             
-            # 현재까지의 대화 기록 가져오기
-            conversation_history = []
-            if st.session_state.conversation_manager:
-                conversation_history = st.session_state.conversation_manager.get_conversation_history()
-
-            # 병렬 처리를 위한 작업 준비
-            doc_tasks = []
-            for doc_name in st.session_state.pdf_names:
-                vector_store = st.session_state.vector_stores.get(doc_name)
-                if vector_store:
-                    doc_tasks.append((doc_name, vector_store, user_query, st.session_state.api_key, conversation_history))
-            
-            # 병렬 처리 실행
-            agent_responses = []
-            progress_placeholder = st.empty()
-            progress_placeholder.info(f"0/{len(doc_tasks)} 문서 처리 완료...")
-            
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                # 각 문서별 처리 작업 제출
-                future_to_doc = {
-                    executor.submit(process_document, doc_name, vector_store, user_query, api_key, conversation_history): doc_name 
-                    for doc_name, vector_store, user_query, api_key, conversation_history in doc_tasks
-                }
+            if uploaded_files:
+                process_button = st.button("문서 처리 시작")
                 
-                # 완료된 작업 처리
-                completed = 0
-                for future in concurrent.futures.as_completed(future_to_doc):
-                    doc_name = future_to_doc[future]
-                    try:
-                        response = future.result()
-                        if response:
-                            agent_responses.append(response)
-                    except Exception as e:
-                        st.error(f"{doc_name} 처리 중 오류 발생: {str(e)}")
-                    
-                    completed += 1
-                    progress_placeholder.info(f"{completed}/{len(doc_tasks)} 문서 처리 완료...")
+                if process_button:
+                    with st.spinner("PDF 문서를 처리 중입니다..."):
+                        for uploaded_file in uploaded_files:
+                            file_name = uploaded_file.name
+                            
+                            # 이미 처리된 파일은 건너뛰기
+                            if file_name in st.session_state.vector_stores:
+                                st.info(f"'{file_name}'은(는) 이미 처리되었습니다.")
+                                continue
+                            
+                            # 임시 파일로 저장
+                            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+                                tmp.write(uploaded_file.getvalue())
+                                tmp_path = tmp.name
+                            
+                            # PDF 처리
+                            try:
+                                vector_store = process_pdf(tmp_path, file_name)
+                                
+                                # 벡터 스토어 저장
+                                st.session_state.vector_stores[file_name] = vector_store
+                                
+                                # 문서 에이전트 생성
+                                doc_agent = create_document_agent(
+                                    file_name, 
+                                    vector_store, 
+                                    st.session_state.gemini_client
+                                )
+                                
+                                # 문서 에이전트 저장
+                                st.session_state.document_agents[file_name] = doc_agent
+                                
+                                st.success(f"'{file_name}' 처리 완료!")
+                                
+                            except Exception as e:
+                                st.error(f"'{file_name}' 처리 중 오류 발생: {str(e)}")
+                            
+                            finally:
+                                # 임시 파일 삭제
+                                os.unlink(tmp_path)
+                        
+                        st.session_state.pdf_uploaded = True
             
-            progress_placeholder.empty()
-
-            with st.expander(f"각 문서별 답변 상세 정보 (총 {len(agent_responses)}개 문서)"):
-                for resp in agent_responses:
-                    st.subheader(f"{resp['source']}의 답변")
-                    st.write(resp['response'])
-                    st.markdown("**참고한 컨텍스트:**")
-                    for ctx in resp['context']:
-                        st.markdown(f"- 유사도 점수: {ctx['score']:.4f}")
-                        st.markdown(f"```\n{ctx['chunk'][:200]}...\n```")
-
-            st.info("헤드 에이전트가 최종 답변을 종합하는 중...")
-            head_agent = HeadAgent(st.session_state.api_key)
-            final_response = head_agent.synthesize_responses(user_query, agent_responses, conversation_history)
-
-            # 대화 기록에 답변 추가
-            st.session_state.chat_history.append({"role": "assistant", "content": final_response})
+            # 처리된 문서 목록 표시
+            if st.session_state.document_agents:
+                st.subheader("처리된 문서 목록")
+                for doc_name in st.session_state.document_agents.keys():
+                    st.markdown(f"- {doc_name}")
             
-            # 대화 관리자에 답변 추가
-            if st.session_state.conversation_manager:
-                st.session_state.conversation_manager.add_assistant_message(final_response)
+            # 새 대화 시작 버튼
+            if st.session_state.pdf_uploaded:
+                if st.button("새 대화 시작"):
+                    start_new_chat()
+    
+    # 메인 화면: 챗봇 인터페이스
+    st.title("PDF 문서 기반 AI 어시스턴트")
+    
+    if not st.session_state.api_key_submitted:
+        st.info("시작하려면 사이드바에서 Google Gemini API 키를 입력해주세요.")
+    elif not st.session_state.pdf_uploaded:
+        st.info("사이드바에서 PDF 파일을 업로드하고 처리해주세요.")
+    else:
+        # 대화 기록 표시
+        for chat in st.session_state.chat_history:
+            st.chat_message("user").write(chat["user"])
+            st.chat_message("assistant").write(chat["assistant"])
+        
+        # 사용자 입력
+        user_input = st.chat_input("질문을 입력하세요...")
+        
+        if user_input and not st.session_state.processing:
+            # 사용자 메시지 표시
+            st.chat_message("user").write(user_input)
             
-            st.rerun()
+            # 로딩 표시
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                message_placeholder.markdown("🤔 생각 중...")
+                
+                # 비동기 처리
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                answer = loop.run_until_complete(process_question(user_input))
+                loop.close()
+                
+                # 답변 표시
+                message_placeholder.markdown(answer)
 
-elif not st.session_state.api_key:
-    st.warning("사용을 시작하려면 사이드바에 Google API 키를 입력하세요.")
-elif not st.session_state.pdf_names:
-    st.warning("사용을 시작하려면 사이드바에서 PDF 파일을 업로드하고 처리하세요.")
+if __name__ == "__main__":
+    main()

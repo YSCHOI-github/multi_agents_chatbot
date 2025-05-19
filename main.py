@@ -6,7 +6,7 @@ import time
 from typing import Dict, List, Any
 import pandas as pd
 
-from utils_v10 import PDFProcessor, VectorStore, DocumentAgent, HeadAgent, GeminiClient
+from utils import PDFProcessor, VectorStore, DocumentAgent, HeadAgent, GeminiClient
 
 # 페이지 설정
 st.set_page_config(

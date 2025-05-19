@@ -4,38 +4,22 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import io
 import PyPDF2
 import google.generativeai as genai
 
 class PDFLoader:
     """PDF 파일을 로드하고 텍스트를 추출하는 클래스"""
     
-    def __init__(self, pdf_file):
-        """
-        pdf_file: 파일 경로(문자열) 또는 파일 객체
-        """
-        self.pdf_file = pdf_file
-        self.file_name = getattr(pdf_file, 'name', 'unnamed_pdf') if hasattr(pdf_file, 'name') else os.path.basename(pdf_file)
+    def __init__(self, pdf_path):
+        self.pdf_path = pdf_path
+        self.file_name = os.path.basename(pdf_path)
     
     def extract_text(self):
         """PDF에서 텍스트를 추출하는 메서드"""
         text = ""
         try:
-            # 파일 객체를 직접 사용하거나 파일 경로인 경우 파일 열기
-            if isinstance(self.pdf_file, str):
-                # 파일 경로인 경우
-                with open(self.pdf_file, 'rb') as file:
-                    reader = PyPDF2.PdfReader(file)
-                    for page_num in range(len(reader.pages)):
-                        page = reader.pages[page_num]
-                        text += page.extract_text() + "\n"
-            else:
-                # Streamlit 업로드 파일 객체인 경우
-                pdf_data = self.pdf_file.read()
-                # BytesIO로 변환하여 PyPDF2가 읽을 수 있도록 함
-                pdf_stream = io.BytesIO(pdf_data)
-                reader = PyPDF2.PdfReader(pdf_stream)
+            with open(self.pdf_path, 'rb') as file:
+                reader = PyPDF2.PdfReader(file)
                 for page_num in range(len(reader.pages)):
                     page = reader.pages[page_num]
                     text += page.extract_text() + "\n"

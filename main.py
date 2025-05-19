@@ -51,26 +51,24 @@ with st.sidebar:
                 st.session_state.pdf_names = []
 
                 for uploaded_file in uploaded_files:
-                    # 수정된 부분: BytesIO 객체를 직접 사용하여 임시 파일 생성 방지
-                    try:
-                        pdf_loader = PDFLoader(uploaded_file)
-                        pdf_text = pdf_loader.extract_text()
-                        
-                        if not pdf_text.startswith("Error"):
-                            chunks = pdf_loader.chunk_text(pdf_text)
-                            vstore = VectorStore()
-                            vstore.add_chunks(chunks, uploaded_file.name)
-                            
-                            if vstore.build_index():
-                                st.session_state.vector_stores[uploaded_file.name] = vstore
-                                st.session_state.pdf_names.append(uploaded_file.name)
-                                st.success(f"{uploaded_file.name} 처리 완료!")
-                            else:
-                                st.error(f"{uploaded_file.name} 인덱싱 실패")
+                    temp_file_path = os.path.join(st.session_state.temp_dir, uploaded_file.name)
+                    with open(temp_file_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+
+                    pdf_loader = PDFLoader(temp_file_path)
+                    pdf_text = pdf_loader.extract_text()
+                    if not pdf_text.startswith("Error"):
+                        chunks = pdf_loader.chunk_text(pdf_text)
+                        vstore = VectorStore()
+                        vstore.add_chunks(chunks, uploaded_file.name)
+                        if vstore.build_index():
+                            st.session_state.vector_stores[uploaded_file.name] = vstore
+                            st.session_state.pdf_names.append(uploaded_file.name)
+                            st.success(f"{uploaded_file.name} 처리 완료!")
                         else:
-                            st.error(pdf_text)
-                    except Exception as e:
-                        st.error(f"{uploaded_file.name} 처리 중 오류 발생: {str(e)}")
+                            st.error(f"{uploaded_file.name} 인덱싱 실패")
+                    else:
+                        st.error(pdf_text)
 
                 if st.session_state.vector_stores:
                     # 대화 관리자 초기화

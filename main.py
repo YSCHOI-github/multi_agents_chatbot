@@ -57,7 +57,7 @@ def create_document_agent(doc_name, vector_store, gemini_client):
         doc_name=doc_name,
         vector_store=vector_store,
         genai_client=gemini_client.get_client(),
-        model_name="models/gemini-1.5-flash"
+        model_name="models/gemini-2.0-flash"
     )
 
 # API 키 제출 함수

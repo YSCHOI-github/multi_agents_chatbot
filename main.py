@@ -68,7 +68,7 @@ def submit_api_key():
             st.session_state.gemini_client = GeminiClient(api_key)
             st.session_state.head_agent = HeadAgent(
                 genai_client=st.session_state.gemini_client.get_client(),
-                model_name="models/gemini-1.5-flash"
+                model_name="models/gemini-2.0-flash"
             )
             st.session_state.api_key_submitted = True
             st.success("API 키가 성공적으로 적용되었습니다!")
